@@ -420,10 +420,23 @@ class DamaiBot(
         """Wait for the detail-page CTA to open either sku or confirm page."""
         if self.config.rush_mode:
             # 极速模式：每次轮询只用 1 个 ID 选择器（~60ms/轮），替代 4 个选择器（~240ms/轮）。
-            # 先检查 sku（更常见的转换目标），再检查确认页 checkbox。
+            # 大麦 9.0.32 的 SKU 页稳定暴露 NcovSkuActivity，但不一定
+            # 暴露旧 layout_sku。预填模式先做单次 Activity RPC，命中即返回。
             skip_reservation_check = not self.config.if_commit_order
             deadline = time.time() + timeout
             while time.time() < deadline:
+                if self.config.use_prefilled_selection:
+                    current_activity = self._get_current_activity()
+                    if "NcovSku" in current_activity:
+                        return {
+                            "state": "sku_page",
+                            "price_container": True,
+                            # 开售时刻信任用户已完成的大麦预填，
+                            # 不再串行 5 个预约文案选择器。
+                            "reservation_mode": False,
+                        }
+                    time.sleep(poll_interval)
+                    continue
                 if self._has_element(By.ID, "cn.damai:id/layout_sku"):
                     return {
                         "state": "sku_page",
@@ -435,10 +448,12 @@ class DamaiBot(
                 if self._has_element(By.ID, "cn.damai:id/checkbox"):
                     return {"state": "order_confirm_page", "submit_button": True}
                 time.sleep(poll_interval)
+            if fallback_probe_on_timeout:
+                # fast probe 自带验证码识别；避免先串行 4 个验证码
+                # 选择器，随后又做一次完整页面探测。
+                return self.probe_current_page(fast=True)
             if self._is_captcha_page():
                 return {"state": "captcha", "captcha": True}
-            if fallback_probe_on_timeout:
-                return self.probe_current_page()
             return None
 
         submit_selectors = [
@@ -656,8 +671,10 @@ class DamaiBot(
             coords = guard.get_cta_center_coords() if guard is not None else None
             if coords is not None:
                 self._cached_hot_path_coords["detail_buy"] = coords
-            logger.info("已启用大麦预填直通：保留预填场次、票档和观演人")
-            return True
+                logger.info("已启用大麦预填直通：保留预填信息并缓存购票坐标")
+                return True
+            logger.warning("预填直通未能缓存购票坐标，到点将使用安全兜底路径")
+            return False
 
         prepared = False
         if self.config.date:
@@ -821,6 +838,7 @@ class DamaiBot(
             fast_validation_hot_path = (
                 self.config.rush_mode
                 and not self.config.if_commit_order
+                and not self.config.use_prefilled_selection
                 and initial_page_probe is not None
                 and page_probe["state"] in {"detail_page", "sku_page"}
             )
@@ -1075,6 +1093,12 @@ class DamaiBot(
             # 5. 确定购买 — brief wait for price selection to register.
             # Damai App ignores confirm clicks until btn_buy_view becomes clickable (price > 0).
             confirm_started_at = _perf_counter()
+            purchase_transition_stage = (
+                "sku_next_click"
+                if self.config.use_prefilled_selection
+                and self.config.if_commit_order
+                else "purchase_to_confirm"
+            )
             submit_ready = direct_confirm_ready
             if submit_ready:
                 logger.info("订单确认页已就绪，无需再次点击下一步")
@@ -1143,16 +1167,33 @@ class DamaiBot(
                             ANDROID_UIAUTOMATOR,
                             'new UiSelector().textMatches(".*确定.*|.*购买.*")',
                         )
-                # Short wait then check if confirm page appeared
-                remaining = confirm_deadline - time.time()
-                check_timeout = min(
-                    1.5 if self.config.use_prefilled_selection else 0.8,
-                    max(0.1, remaining),
+                log_event(
+                    logger,
+                    "hot_click",
+                    action="sku_next",
+                    duration_ms=int((_perf_counter() - confirm_started_at) * 1000),
+                    prefilled=bool(self.config.use_prefilled_selection),
                 )
-                submit_ready = self._wait_for_submit_ready(
-                    timeout=check_timeout,
-                    poll_interval=0.03 if self.config.rush_mode else 0.05,
-                )
+                if (
+                    self.config.use_prefilled_selection
+                    and self.config.if_commit_order
+                ):
+                    # 正式预填模式不在这里等 checkbox/文案后又重新
+                    # 查找「立即提交」。_submit_order_fast 会用同一次
+                    # wait-and-click 在按钮出现的瞬间直接点击。
+                    submit_ready = True
+                    logger.info("大麦预填直通：下一步后直接等待并点击立即提交")
+                else:
+                    # Short wait then check if confirm page appeared
+                    remaining = confirm_deadline - time.time()
+                    check_timeout = min(
+                        1.5 if self.config.use_prefilled_selection else 0.8,
+                        max(0.1, remaining),
+                    )
+                    submit_ready = self._wait_for_submit_ready(
+                        timeout=check_timeout,
+                        poll_interval=0.03 if self.config.rush_mode else 0.05,
+                    )
                 if self._terminal_failure_reason:
                     break
                 if not submit_ready and confirm_attempt < max_confirm_attempts:
@@ -1166,10 +1207,12 @@ class DamaiBot(
                         )
                         self._set_terminal_failure("sold_out")
                         self._record_purchase_stage(
-                            "purchase_to_confirm", confirm_started_at
+                            purchase_transition_stage, confirm_started_at
                         )
                         return False
-            self._record_purchase_stage("purchase_to_confirm", confirm_started_at)
+            self._record_purchase_stage(
+                purchase_transition_stage, confirm_started_at
+            )
             if self._terminal_failure_reason:
                 return False
             if not submit_ready:
@@ -1211,11 +1254,21 @@ class DamaiBot(
                 ),
                 (By.XPATH, '//*[contains(@text,"提交")]'),
             ]
-            with self._purchase_timed_stage("attendee_validation"):
-                attendees_ready = self._ensure_attendees_selected_on_confirm_page(
-                    require_attendee_section=self.config.rush_mode
-                    and not self.config.if_commit_order
+            if self.config.use_prefilled_selection:
+                # 用户明确选择信任大麦预填观演人；不读 checkbox、
+                # 不 dump hierarchy，也不做姓名匹配。
+                attendees_ready = True
+                logger.info("大麦预填直通：按配置跳过观演人状态校验")
+                skipped_at = _perf_counter()
+                self._record_purchase_stage(
+                    "attendee_validation_skipped", skipped_at
                 )
+            else:
+                with self._purchase_timed_stage("attendee_validation"):
+                    attendees_ready = self._ensure_attendees_selected_on_confirm_page(
+                        require_attendee_section=self.config.rush_mode
+                        and not self.config.if_commit_order
+                    )
             if not attendees_ready:
                 self._set_terminal_failure("attendee_unselected")
                 logger.error("订单提交前观演人未选择完整，已停止自动提交")

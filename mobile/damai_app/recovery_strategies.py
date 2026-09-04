@@ -321,7 +321,10 @@ class RecoveryStrategiesMixin:
             return self.run_ticket_grabbing()
         elif state == "order_confirm_page":
             if not self.config.if_commit_order:
-                if not self._ensure_attendees_selected_on_confirm_page():
+                if (
+                    not self.config.use_prefilled_selection
+                    and not self._ensure_attendees_selected_on_confirm_page()
+                ):
                     self._set_terminal_failure("attendee_unselected")
                     logger.error("开发验证模式下观演人未选择完整，已停止")
                     return False
@@ -340,7 +343,10 @@ class RecoveryStrategiesMixin:
                     # 与主路径 validation 口径一致，成功日志按真实结局输出
                     self._set_run_outcome("validation_ready")
                 return ok
-            if not self._ensure_attendees_selected_on_confirm_page():
+            if (
+                not self.config.use_prefilled_selection
+                and not self._ensure_attendees_selected_on_confirm_page()
+            ):
                 self._set_terminal_failure("attendee_unselected")
                 return False
             submit_selectors = [

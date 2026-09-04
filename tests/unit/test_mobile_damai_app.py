@@ -173,6 +173,62 @@ class TestPrefilledPurchaseHotPath:
         cold_preselect.assert_not_called()
         assert tap.call_args.args[0] == "detail_buy"
 
+    def test_prepared_prefilled_detail_entry_taps_before_popup_queries(self, bot):
+        bot.config.rush_mode = True
+        bot.config.use_prefilled_selection = True
+        bot._cached_hot_path_coords["detail_buy"] = (744, 1825)
+
+        with patch.object(bot, "_dismiss_fast_blocking_dialogs") as dismiss:
+            with patch.object(bot, "_cached_tap", return_value=True) as tap:
+                with patch.object(
+                    bot,
+                    "_wait_for_purchase_entry_result",
+                    return_value={"state": "sku_page"},
+                ):
+                    result = bot._enter_purchase_flow_from_detail_page(prepared=True)
+
+        assert result == {"state": "sku_page"}
+        dismiss.assert_not_called()
+        tap.assert_called_once()
+
+    def test_prefilled_purchase_entry_uses_ncov_activity_without_element_queries(
+        self, bot
+    ):
+        bot.config.rush_mode = True
+        bot.config.use_prefilled_selection = True
+
+        with patch.object(
+            bot,
+            "_get_current_activity",
+            return_value=".seatbiz.sku.qilin.ui.NcovSkuActivity",
+        ):
+            with patch.object(bot, "_has_element") as has_element:
+                result = bot._wait_for_purchase_entry_result(timeout=0.2)
+
+        assert result == {
+            "state": "sku_page",
+            "price_container": True,
+            "reservation_mode": False,
+        }
+        has_element.assert_not_called()
+
+    def test_prefilled_prepare_requires_cached_detail_coordinates(self, bot):
+        bot.config.use_prefilled_selection = True
+        detail_probe = {
+            "state": "detail_page",
+            "purchase_button": True,
+            "price_container": True,
+        }
+
+        with patch.object(bot, "probe_current_page", return_value=detail_probe):
+            bot._guard.get_cta_center_coords = Mock(return_value=(744, 1825))
+            assert bot._prepare_detail_page_hot_path() is True
+            assert bot._cached_hot_path_coords["detail_buy"] == (744, 1825)
+
+            bot._guard.get_cta_center_coords = Mock(return_value=None)
+            bot._cached_hot_path_coords.clear()
+            assert bot._prepare_detail_page_hot_path() is False
+
     def test_prefilled_sku_skips_selection_and_clicks_next_once(self, bot):
         bot.config.rush_mode = True
         bot.config.if_commit_order = True
@@ -196,12 +252,12 @@ class TestPrefilledPurchaseHotPath:
                             ) as click_next:
                                 with patch.object(
                                     bot, "_wait_for_submit_ready", return_value=True
-                                ):
+                                ) as wait_submit:
                                     with patch.object(
                                         bot,
                                         "_ensure_attendees_selected_on_confirm_page",
                                         return_value=True,
-                                    ):
+                                    ) as validate_attendees:
                                         with patch.object(
                                             bot, "_submit_order_fast", return_value="success"
                                         ):
@@ -213,6 +269,8 @@ class TestPrefilledPurchaseHotPath:
         select_date.assert_not_called()
         select_price.assert_not_called()
         click_next.assert_called_once_with(burst_count=1)
+        wait_submit.assert_not_called()
+        validate_attendees.assert_not_called()
 
     def test_rush_sale_wait_does_not_reprobe_at_open_time(self, bot):
         bot.config.rush_mode = True
@@ -274,6 +332,20 @@ class TestPrefilledPurchaseHotPath:
 
         assert click.call_count == 1
 
+    def test_prefilled_submit_waits_and_clicks_in_one_selector_call(self, bot):
+        bot.config.use_prefilled_selection = True
+        bot.config.rush_aggressive_retry = False
+        submit_selectors = [
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("提交")'),
+        ]
+
+        with patch.object(bot, "ultra_fast_click", return_value=True) as click:
+            with patch.object(bot, "verify_order_result", return_value="success"):
+                assert bot._submit_order_fast(submit_selectors) == "success"
+
+        click.assert_called_once_with(*submit_selectors[0], timeout=1.5)
+
     def test_retry_from_order_confirm_page_does_not_reenter_sku_flow(self, bot):
         bot.config.rush_mode = True
         bot.config.if_commit_order = False
@@ -295,12 +367,13 @@ class TestPrefilledPurchaseHotPath:
                                 bot,
                                 "_ensure_attendees_selected_on_confirm_page",
                                 return_value=True,
-                            ):
+                            ) as validate_attendees:
                                 result = bot.run_ticket_grabbing()
 
         assert result is True
         assert bot._last_run_outcome == "validation_ready"
         click_next.assert_not_called()
+        validate_attendees.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -3338,6 +3411,29 @@ class TestFastRetry:
         submit_fast.assert_called_once()
         # 旧旁路已死：点击不再被直接当作成功
         smart_click.assert_not_called()
+
+    def test_prefilled_fast_retry_skips_attendee_validation(self, bot):
+        bot.config.use_prefilled_selection = True
+        bot.config.if_commit_order = True
+        confirm_probe = {
+            "state": "order_confirm_page",
+            "purchase_button": False,
+            "price_container": False,
+            "quantity_picker": False,
+            "submit_button": True,
+        }
+
+        with patch.object(bot, "probe_current_page", return_value=confirm_probe):
+            with patch.object(
+                bot, "_ensure_attendees_selected_on_confirm_page"
+            ) as validate_attendees:
+                with patch.object(
+                    bot, "_submit_order_fast", return_value="success"
+                ):
+                    result = bot._fast_retry_from_current_state()
+
+        assert result is True
+        validate_attendees.assert_not_called()
 
     @pytest.mark.parametrize(
         "submit_result,expected_return,expected_outcome,expected_terminal",
