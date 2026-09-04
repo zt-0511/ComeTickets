@@ -177,6 +177,18 @@ class TestMobileConfigValidation:
 
 
 class TestMobileConfigNewFields:
+    def test_use_prefilled_selection_default_false(self):
+        cfg = Config(**_make())
+        assert cfg.use_prefilled_selection is False
+
+    def test_use_prefilled_selection_must_be_bool(self):
+        with pytest.raises(ValueError, match="use_prefilled_selection"):
+            Config(**_make(use_prefilled_selection="yes"))
+
+    def test_use_prefilled_selection_round_trips(self):
+        cfg = Config(**_make(use_prefilled_selection=True))
+        assert cfg.to_dict()["use_prefilled_selection"] is True
+
     def test_sell_start_time_valid_iso(self):
         cfg = Config(**_make(sell_start_time="2026-04-01T20:00:00+08:00"))
         assert cfg.sell_start_time == "2026-04-01T20:00:00+08:00"

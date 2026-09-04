@@ -87,6 +87,22 @@ class TestFastProbe:
         for key in _DEFAULT_RESULT:
             assert key in result
 
+    def test_sku_captcha_is_not_misclassified_as_sku(self):
+        device = _make_device("com.damai.NcovSkuActivity")
+
+        def selector(**kwargs):
+            element = Mock()
+            element.exists = kwargs.get("resourceId") == "baxia-punish"
+            return element
+
+        device.side_effect = selector
+        probe = PageProbe(device, cache_ttl_s=0)
+
+        result = probe.probe_current_page(fast=True)
+
+        assert result["state"] == "captcha"
+        assert result["captcha"] is True
+
 
 # ---------------------------------------------------------------------------
 # TTL cache tests

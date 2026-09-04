@@ -35,6 +35,7 @@ SUMMARY_KEYS = {
     "mode",
     "attempts",
     "duration_ms",
+    "stage_timings_ms",
     "terminal_reason",
     "started_at",
     "finished_at",
@@ -56,6 +57,9 @@ def _make_fake_bot(
     bot._terminal_failure_reason = terminal_reason
     bot._last_run_outcome = outcome
     bot._attempts_made = attempts
+    bot._purchase_stage_timings = [
+        {"attempt": 1, "stage": "page_probe", "duration_ms": 12}
+    ]
     bot._execution_mode_key = Mock(return_value=mode)
     bot.config = Mock()
     bot.config.serial = serial
@@ -222,6 +226,12 @@ class TestRunSummary:
         assert summary["serial"] == "emulator-5554"
         assert isinstance(summary["duration_ms"], int)
         assert summary["duration_ms"] >= 0
+        assert summary["stage_timings_ms"][0]["stage"] == "initialize_device"
+        assert summary["stage_timings_ms"][1] == {
+            "attempt": 1,
+            "stage": "page_probe",
+            "duration_ms": 12,
+        }
 
     def test_result_json_env_var_fallback(self, tmp_path, monkeypatch):
         result_path = tmp_path / "env_run.json"

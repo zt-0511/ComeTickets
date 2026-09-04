@@ -81,12 +81,19 @@ def main(argv=None) -> int:
     t0 = time.monotonic()
     started_at = datetime.now().astimezone().isoformat()
     bot = None
+    initialization_ms = None
     exit_code = EXIT_CONFIG_OR_DEVICE_ERROR
     outcome = "config_or_device_error"
     terminal_reason = None
     try:
         try:
+            init_started_at = time.monotonic()
             bot = DamaiBot()
+            initialization_ms = int((time.monotonic() - init_started_at) * 1000)
+            logger.info(
+                "event=stage_timing attempt=0 stage=initialize_device duration_ms=%d",
+                initialization_ms,
+            )
         except KeyboardInterrupt:
             exit_code, outcome = EXIT_INTERRUPTED, "interrupted"
             terminal_reason = "keyboard_interrupt"
@@ -130,6 +137,19 @@ def main(argv=None) -> int:
             # 初始化失败时从环境变量兜底（--serial 已写入 / 脚本已 export）
             serial = os.environ.get(SERIAL_OVERRIDE_ENV_VAR, "").strip() or None
             mode = None
+        stage_timings = []
+        if initialization_ms is not None:
+            stage_timings.append(
+                {
+                    "attempt": 0,
+                    "stage": "initialize_device",
+                    "duration_ms": initialization_ms,
+                }
+            )
+        if bot is not None:
+            stage_timings.extend(
+                _safe(lambda: list(bot._purchase_stage_timings), []) or []
+            )
         write_run_summary(
             result_path,
             {
@@ -142,6 +162,7 @@ def main(argv=None) -> int:
                     lambda: int(getattr(bot, "_attempts_made", 0) or 0), 0
                 ),
                 "duration_ms": int((time.monotonic() - t0) * 1000),
+                "stage_timings_ms": stage_timings,
                 "terminal_reason": terminal_reason,
                 "started_at": started_at,
                 "finished_at": datetime.now().astimezone().isoformat(),

@@ -137,6 +137,173 @@ def bot():
 
 
 # ---------------------------------------------------------------------------
+# Prefilled purchase / anti-abuse hot path
+# ---------------------------------------------------------------------------
+
+
+class TestPrefilledPurchaseHotPath:
+    def test_purchase_stage_timing_records_machine_readable_entry(self, bot):
+        bot._attempts_made = 2
+        with bot._purchase_timed_stage("detail_to_purchase"):
+            pass
+
+        timing = bot._purchase_stage_timings[-1]
+        assert timing["attempt"] == 2
+        assert timing["stage"] == "detail_to_purchase"
+        assert isinstance(timing["duration_ms"], int)
+        assert timing["duration_ms"] >= 0
+
+    def test_prefilled_detail_entry_skips_date_and_city_preselection(self, bot):
+        bot.config.rush_mode = True
+        bot.config.use_prefilled_selection = True
+
+        with patch.object(bot, "_dismiss_fast_blocking_dialogs"):
+            with patch.object(
+                bot, "_rush_preselect_and_buy_via_xml"
+            ) as cold_preselect:
+                with patch.object(bot, "_cached_tap", return_value=True) as tap:
+                    with patch.object(
+                        bot,
+                        "_wait_for_purchase_entry_result",
+                        return_value={"state": "sku_page"},
+                    ):
+                        result = bot._enter_purchase_flow_from_detail_page()
+
+        assert result == {"state": "sku_page"}
+        cold_preselect.assert_not_called()
+        assert tap.call_args.args[0] == "detail_buy"
+
+    def test_prefilled_sku_skips_selection_and_clicks_next_once(self, bot):
+        bot.config.rush_mode = True
+        bot.config.if_commit_order = True
+        bot.config.use_prefilled_selection = True
+        bot.config.rush_aggressive_retry = False
+        initial_probe = {
+            "state": "sku_page",
+            "price_container": True,
+            "reservation_mode": False,
+        }
+
+        with patch.object(bot, "dismiss_startup_popups"):
+            with patch.object(bot, "check_session_valid", return_value=True):
+                with patch.object(bot, "wait_for_sale_start"):
+                    with patch.object(bot, "select_performance_date") as select_date:
+                        with patch.object(bot, "_select_price_option") as select_price:
+                            with patch.object(
+                                bot,
+                                "_click_sku_buy_button_element",
+                                return_value=True,
+                            ) as click_next:
+                                with patch.object(
+                                    bot, "_wait_for_submit_ready", return_value=True
+                                ):
+                                    with patch.object(
+                                        bot,
+                                        "_ensure_attendees_selected_on_confirm_page",
+                                        return_value=True,
+                                    ):
+                                        with patch.object(
+                                            bot, "_submit_order_fast", return_value="success"
+                                        ):
+                                            result = bot.run_ticket_grabbing(
+                                                initial_page_probe=initial_probe
+                                            )
+
+        assert result is True
+        select_date.assert_not_called()
+        select_price.assert_not_called()
+        click_next.assert_called_once_with(burst_count=1)
+
+    def test_rush_sale_wait_does_not_reprobe_at_open_time(self, bot):
+        bot.config.rush_mode = True
+        bot.config.sell_start_time = "2026-09-02T17:00:00+08:00"
+        bot.config.use_prefilled_selection = True
+        detail_probe = {
+            "state": "detail_page",
+            "purchase_button": True,
+            "price_container": True,
+            "reservation_mode": False,
+        }
+
+        with patch.object(
+            bot, "probe_current_page", return_value=detail_probe
+        ) as probe:
+            with patch.object(bot, "dismiss_startup_popups"):
+                with patch.object(bot, "check_session_valid", return_value=True):
+                    with patch.object(
+                        bot, "_prepare_detail_page_hot_path", return_value=True
+                    ):
+                        with patch.object(bot, "wait_for_sale_start"):
+                            with patch.object(
+                                bot,
+                                "_enter_purchase_flow_from_detail_page",
+                                return_value={"state": "captcha", "captcha": True},
+                            ):
+                                assert bot.run_ticket_grabbing() is False
+
+        # Initial classification + one pre-sale refresh; no post-sale full probe.
+        assert probe.call_count == 2
+        assert bot._terminal_failure_reason == "captcha"
+
+    def test_submit_ready_captcha_sets_terminal_failure(self, bot):
+        bot.config.rush_mode = True
+        with patch.object(bot, "_has_any_element", return_value=False):
+            with patch.object(bot, "_is_captcha_page", return_value=True):
+                assert bot._wait_for_submit_ready(timeout=0) is False
+
+        assert bot._last_run_outcome == "captcha"
+        assert bot._terminal_failure_reason == "captcha"
+
+    def test_rush_skip_price_dump_avoids_device_capture(self, bot):
+        bot.config.rush_mode = True
+        bot.config.rush_skip_price_dump = True
+
+        assert bot._save_price_failure_dump("test") is None
+        bot.d.dump_hierarchy.assert_not_called()
+
+    def test_non_aggressive_submit_clicks_only_once(self, bot):
+        bot.config.rush_aggressive_retry = False
+        submit_selectors = [
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("提交")'),
+        ]
+
+        with patch.object(bot, "ultra_fast_click", return_value=True) as click:
+            with patch.object(bot, "verify_order_result", return_value="timeout"):
+                assert bot._submit_order_fast(submit_selectors) == "timeout"
+
+        assert click.call_count == 1
+
+    def test_retry_from_order_confirm_page_does_not_reenter_sku_flow(self, bot):
+        bot.config.rush_mode = True
+        bot.config.if_commit_order = False
+        bot.config.use_prefilled_selection = True
+        confirm_probe = {
+            "state": "order_confirm_page",
+            "price_container": False,
+            "reservation_mode": False,
+        }
+
+        with patch.object(bot, "dismiss_startup_popups"):
+            with patch.object(bot, "check_session_valid", return_value=True):
+                with patch.object(bot, "probe_current_page", return_value=confirm_probe):
+                    with patch.object(bot, "wait_for_sale_start"):
+                        with patch.object(
+                            bot, "_click_sku_buy_button_element"
+                        ) as click_next:
+                            with patch.object(
+                                bot,
+                                "_ensure_attendees_selected_on_confirm_page",
+                                return_value=True,
+                            ):
+                                result = bot.run_ticket_grabbing()
+
+        assert result is True
+        assert bot._last_run_outcome == "validation_ready"
+        click_next.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Initialization
 # ---------------------------------------------------------------------------
 
@@ -1562,8 +1729,8 @@ class TestRunTicketGrabbing:
 
         assert result is False
         assert bot._last_run_outcome == submit_result
-        # 不设 terminal，run_with_retry 仍可按 fast_retry_count 继续尝试
-        assert bot._terminal_failure_reason is None
+        expected_terminal = "captcha" if submit_result == "captcha" else None
+        assert bot._terminal_failure_reason == expected_terminal
 
     def test_run_ticket_grabbing_returns_success_when_pending_order_dialog_detected_early(
         self, bot
@@ -2409,7 +2576,7 @@ class TestFinalizeSubmitResult:
             ("success", True, "order_submitted", None),
             ("existing_order", True, "order_pending_payment", None),
             ("sold_out", False, "sold_out", None),
-            ("captcha", False, "captcha", None),
+            ("captcha", False, "captcha", "captcha"),
             ("timeout", False, None, "submit_unverified"),
             # 未知值（如 purchase_flow 防御性 "failed"）必须 fail closed
             ("garbage", False, None, "submit_unverified"),
@@ -2997,7 +3164,7 @@ class TestDetailPagePurchaseEntry:
 
         assert result == next_probe
         cached_tap.assert_called()
-        wait_result.assert_called_once_with(timeout=6.0, poll_interval=0.03)
+        wait_result.assert_called_once_with(timeout=1.5, poll_interval=0.03)
 
     def test_enter_purchase_flow_falls_back_to_book_selectors(self, bot):
         next_probe = {"state": "order_confirm_page", "submit_button": True}
@@ -3178,7 +3345,7 @@ class TestFastRetry:
             ("success", True, "order_submitted", None),
             ("existing_order", True, "order_pending_payment", None),
             ("sold_out", False, "sold_out", None),
-            ("captcha", False, "captcha", None),
+            ("captcha", False, "captcha", "captcha"),
             ("timeout", False, None, "submit_unverified"),
         ],
     )

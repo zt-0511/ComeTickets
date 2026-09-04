@@ -300,6 +300,12 @@ class RecoveryStrategiesMixin:
         page_probe = self.probe_current_page()
         state = page_probe["state"]
 
+        if state == "captcha":
+            self._set_run_outcome("captcha")
+            self._set_terminal_failure("captcha")
+            logger.error("检测到大麦验证码，已暂停自动点击，请在手机上手动完成验证")
+            return False
+
         if state in ("detail_page", "sku_page"):
             if self.item_detail and not self._current_page_matches_target(page_probe):
                 if not self.config.auto_navigate:

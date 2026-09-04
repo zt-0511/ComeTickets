@@ -36,6 +36,7 @@ class PageState(str, Enum):
     ORDER_CONFIRM_PAGE = "order_confirm_page"
     CONSENT_DIALOG = "consent_dialog"
     PENDING_ORDER_DIALOG = "pending_order_dialog"
+    CAPTCHA = "captcha"
     UNKNOWN = "unknown"
 
 
@@ -134,6 +135,7 @@ _DEFAULT_RESULT: Dict[str, Any] = {
     "submit_button": False,
     "reservation_mode": False,
     "pending_order_dialog": False,
+    "captcha": False,
 }
 
 
@@ -310,6 +312,9 @@ class PageProbe:
         activity = self.get_current_activity()
         logger.debug("page probe (fast): activity=%s", activity)
 
+        if "NcovSku" in activity and self._has_captcha_markers():
+            return _make_result(state=PageState.CAPTCHA.value, captcha=True)
+
         for substring, state in _ACTIVITY_STATE_MAP:
             if substring in activity:
                 return _make_result(state=state)
@@ -331,6 +336,15 @@ class PageProbe:
         """
         activity = self.get_current_activity()
         logger.debug("page probe (full): activity=%s", activity)
+
+        # 大麦风控页通常覆盖在 SKU/WebView Activity 上；必须先于 Activity
+        # 分类识别，否则会被误判为 sku_page 并继续高频点击。
+        known_non_captcha_activity = any(
+            marker in activity
+            for marker in ("ProjectDetail", "MainActivity", "SearchActivity")
+        )
+        if not known_non_captcha_activity and self._has_captcha_markers():
+            return _make_result(state=PageState.CAPTCHA.value, captcha=True)
 
         # ------------------------------------------------------------------
         # Fast path: Activity-based detection with minimal confirmation
@@ -457,6 +471,12 @@ class PageProbe:
             return el.exists
         except Exception:
             return False
+
+    def _has_captcha_markers(self) -> bool:
+        """Detect the official anti-abuse verification page without interacting."""
+        return self._exists_by_resource_id(
+            "baxia-punish"
+        ) or self._exists_by_resource_id("nocaptcha")
 
     def _exists_by_text(self, text: str) -> bool:
         try:

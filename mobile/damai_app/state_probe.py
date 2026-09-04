@@ -72,6 +72,16 @@ class StateProbeMixin:
 
         return any(self._has_element(by, value) for by, value in reservation_indicators)
 
+    def _is_captcha_page(self):
+        """Detect Damai's verification screen; never attempts to solve or bypass it."""
+        captcha_indicators = [
+            (By.ID, "baxia-punish"),
+            (By.ID, "nocaptcha"),
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("操作过于频繁")'),
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("完成验证后")'),
+        ]
+        return any(self._has_element(by, value) for by, value in captcha_indicators)
+
     def get_visible_date_options(self, xml_root=None):
         """Return visible date options on the current page."""
         if xml_root is not None and self._using_u2():

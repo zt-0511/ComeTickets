@@ -40,17 +40,23 @@ class PurchaseFlowMixin:
             self._dismiss_fast_blocking_dialogs()
         if not prepared:
             if self.config.rush_mode:
+                if self.config.use_prefilled_selection:
+                    logger.info("大麦预填直通：详情页不再重选日期和城市")
                 # 极速模式冷路径：单次 XML dump 提取所有坐标（~0.3s），替代多次 _cached_tap（~3-4s）。
-                # 热路径（有缓存）用 _cached_tap 直接点击缓存坐标（1次 HTTP/元素）。
-                if self._using_u2() and not self._cached_hot_path_coords.get(
+                # 预填模式不走该路径，因为它会额外点击日期/城市。
+                elif self._using_u2() and not self._cached_hot_path_coords.get(
                     "detail_buy"
                 ):
                     # Cold path: single XML dump for all detail page elements.
                     if self._rush_preselect_and_buy_via_xml():
                         next_probe = self._wait_for_purchase_entry_result(
-                            timeout=6.0, poll_interval=0.03
+                            timeout=1.5, poll_interval=0.03
                         )
-                        if next_probe["state"] in {"sku_page", "order_confirm_page"}:
+                        if next_probe["state"] in {
+                            "sku_page",
+                            "order_confirm_page",
+                            "captcha",
+                        }:
                             return next_probe
                 else:
                     # Warm path: cached coords for date/city/buy.
@@ -118,9 +124,13 @@ class PurchaseFlowMixin:
                 )
             if _buy_clicked:
                 next_probe = self._wait_for_purchase_entry_result(
-                    timeout=6.0, poll_interval=0.03
+                    timeout=1.5, poll_interval=0.03
                 )
-                if next_probe["state"] in {"sku_page", "order_confirm_page"}:
+                if next_probe["state"] in {
+                    "sku_page",
+                    "order_confirm_page",
+                    "captcha",
+                }:
                     return next_probe
 
         # 文案集合源 SALE_READY_TEXTS（issue #29）+ 旧"预约/购买"兜底
@@ -140,11 +150,14 @@ class PurchaseFlowMixin:
         ):
             logger.warning("购票按钮点击失败")
             return None
-        return self._wait_for_purchase_entry_result(timeout=5, poll_interval=0.08)
+        return self._wait_for_purchase_entry_result(
+            timeout=1.5 if self.config.rush_mode else 5,
+            poll_interval=0.05 if self.config.rush_mode else 0.08,
+        )
 
     def _submit_order_fast(self, submit_selectors):
         """Attempt submit quickly and retry within the confirm page before falling back."""
-        attempt_count = 3
+        attempt_count = 3 if self.config.rush_aggressive_retry else 1
         has_submitted_once = False
         t0 = time.monotonic()
         for attempt in range(attempt_count):

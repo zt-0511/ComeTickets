@@ -52,6 +52,8 @@
   "rush_skip_price_dump": true,
   // 失败后的激进快速重试（缩短退避、增加并发轮询）
   "rush_aggressive_retry": true,
+  // 已在大麦预约页预填场次、票档、数量和观演人时开启；正式开售后直接点击下一步。
+  "use_prefilled_selection": false,
   // 快速重试次数（不重建 driver）
   "fast_retry_count": 8,
   // 快速重试间隔（毫秒）

@@ -28,6 +28,16 @@ preflight_check_adb() {
             fi
         done
     fi
+    if ! command -v adb >/dev/null 2>&1 && [ -n "${CONDA_PREFIX:-}" ]; then
+        # adbutils 的 PyPI wheel 自带 adb；本项目的 Conda 环境可能只有
+        # 这一份二进制。自动纳入 PATH，避免 launchd/非交互 shell 丢失 adb。
+        for _adb in "$CONDA_PREFIX"/lib/python*/site-packages/adbutils/binaries/adb; do
+            if [ -x "$_adb" ]; then
+                export PATH="$(dirname "$_adb"):$PATH"
+                break
+            fi
+        done
+    fi
     if ! command -v adb >/dev/null 2>&1; then
         echo "❌ 未找到 adb 命令。任选其一："
         echo "   1) brew install android-platform-tools"
