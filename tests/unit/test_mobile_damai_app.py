@@ -107,6 +107,7 @@ def bot():
     mock_driver.settings = {}
     mock_driver.shell = Mock()
     mock_driver.app_current = Mock(return_value={"package": "cn.damai"})
+    mock_driver.window_size = Mock(return_value=(1080, 1920))
     mock_driver.update_settings = Mock()
     mock_driver.execute_script = Mock()
     mock_driver.find_element = Mock()
@@ -229,7 +230,7 @@ class TestPrefilledPurchaseHotPath:
             bot._cached_hot_path_coords.clear()
             assert bot._prepare_detail_page_hot_path() is False
 
-    def test_prefilled_sku_skips_selection_and_clicks_next_once(self, bot):
+    def test_prefilled_sku_uses_activity_confirmed_hot_path(self, bot):
         bot.config.rush_mode = True
         bot.config.if_commit_order = True
         bot.config.use_prefilled_selection = True
@@ -247,9 +248,9 @@ class TestPrefilledPurchaseHotPath:
                         with patch.object(bot, "_select_price_option") as select_price:
                             with patch.object(
                                 bot,
-                                "_click_sku_buy_button_element",
+                                "_advance_prefilled_sku_to_confirm",
                                 return_value=True,
-                            ) as click_next:
+                            ) as advance_sku:
                                 with patch.object(
                                     bot, "_wait_for_submit_ready", return_value=True
                                 ) as wait_submit:
@@ -259,8 +260,10 @@ class TestPrefilledPurchaseHotPath:
                                         return_value=True,
                                     ) as validate_attendees:
                                         with patch.object(
-                                            bot, "_submit_order_fast", return_value="success"
-                                        ):
+                                            bot,
+                                            "_submit_prefilled_order_hotspot",
+                                            return_value="success",
+                                        ) as submit_hotspot:
                                             result = bot.run_ticket_grabbing(
                                                 initial_page_probe=initial_probe
                                             )
@@ -268,9 +271,69 @@ class TestPrefilledPurchaseHotPath:
         assert result is True
         select_date.assert_not_called()
         select_price.assert_not_called()
-        click_next.assert_called_once_with(burst_count=1)
+        advance_sku.assert_called_once_with()
+        submit_hotspot.assert_called_once_with()
         wait_submit.assert_not_called()
         validate_attendees.assert_not_called()
+
+    def test_prefilled_hotspot_uses_proportional_coords_and_caches(self, bot):
+        bot._cached_hot_path_coords.clear()
+
+        assert bot._cache_prefilled_action_coords() == (907, 1824)
+        assert bot._cache_prefilled_action_coords() == (907, 1824)
+
+        bot.d.window_size.assert_called_once_with()
+
+    def test_prefilled_sku_retries_until_activity_changes(self, bot):
+        activities = [
+            "cn.damai.commonbusiness.seatbiz.sku.qilin.ui.NcovSkuActivity",
+            "cn.damai.commonbusiness.seatbiz.sku.qilin.ui.NcovSkuActivity",
+            "cn.damai.trade.orderconfirm.OrderConfirmActivity",
+        ]
+        bot._PREFILLED_SKU_CLICK_INTERVAL_SECONDS = 0
+
+        with patch.object(
+            bot, "_dispatch_prefilled_hotspot_click", return_value=True
+        ) as click:
+            with patch.object(
+                bot, "_get_current_activity", side_effect=activities
+            ):
+                assert bot._advance_prefilled_sku_to_confirm() is True
+
+        assert click.call_args_list == [
+            call("sku_next", attempt=1),
+            call("sku_next", attempt=2),
+            call("sku_next", attempt=3),
+        ]
+
+    def test_prefilled_sku_stops_after_three_clicks_without_transition(self, bot):
+        bot._PREFILLED_SKU_CLICK_INTERVAL_SECONDS = 0
+
+        with patch.object(
+            bot, "_dispatch_prefilled_hotspot_click", return_value=True
+        ) as click:
+            with patch.object(
+                bot,
+                "_get_current_activity",
+                return_value="cn.damai.NcovSkuActivity",
+            ):
+                assert bot._advance_prefilled_sku_to_confirm() is False
+
+        assert click.call_count == 3
+
+    def test_prefilled_submit_clicks_hotspot_once_then_verifies(self, bot):
+        bot._PREFILLED_SUBMIT_SETTLE_SECONDS = 0
+
+        with patch.object(
+            bot, "_dispatch_prefilled_hotspot_click", return_value=True
+        ) as click:
+            with patch.object(
+                bot, "verify_order_result", return_value="success"
+            ) as verify:
+                assert bot._submit_prefilled_order_hotspot() == "success"
+
+        click.assert_called_once_with("submit_click", attempt=1)
+        verify.assert_called_once_with(timeout=3)
 
     def test_rush_sale_wait_does_not_reprobe_at_open_time(self, bot):
         bot.config.rush_mode = True
@@ -291,13 +354,26 @@ class TestPrefilledPurchaseHotPath:
                     with patch.object(
                         bot, "_prepare_detail_page_hot_path", return_value=True
                     ):
-                        with patch.object(bot, "wait_for_sale_start"):
+                        with patch.object(
+                            bot, "wait_until_configured_sale_time"
+                        ) as wait_clock:
                             with patch.object(
-                                bot,
-                                "_enter_purchase_flow_from_detail_page",
-                                return_value={"state": "captcha", "captcha": True},
-                            ):
-                                assert bot.run_ticket_grabbing() is False
+                                bot, "wait_for_sale_start"
+                            ) as wait_for_cta:
+                                with patch.object(
+                                    bot,
+                                    "_enter_purchase_flow_from_detail_page",
+                                    return_value={"state": "captcha", "captcha": True},
+                                ) as enter_purchase:
+                                    assert bot.run_ticket_grabbing() is False
+
+        wait_clock.assert_has_calls([call(offset_ms=-300), call()])
+        wait_for_cta.assert_not_called()
+        enter_purchase.assert_called_once_with(
+            prepared=True,
+            transition_timeout=0.24,
+            fallback_probe_on_timeout=False,
+        )
 
         # Initial classification + one pre-sale refresh; no post-sale full probe.
         assert probe.call_count == 2

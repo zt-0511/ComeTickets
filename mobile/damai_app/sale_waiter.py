@@ -44,6 +44,44 @@ except ModuleNotFoundError:  # pragma: no cover
 class SaleWaiterMixin:
     """Mixin contributing sale-start detection helpers to ``DamaiBot``."""
 
+    def wait_until_configured_sale_time(self, offset_ms=0):
+        """Wait only on the local clock until the configured sale-time offset.
+
+        The prefilled hot path uses this instead of CTA/UI polling: it enters
+        the SKU page shortly before the sale and then releases the next click
+        at the official configured timestamp.  No device query is performed
+        while waiting.
+        """
+        if self.config.sell_start_time is None:
+            return
+
+        tz_shanghai = timezone(timedelta(hours=8))
+        sell_time = datetime.fromisoformat(self.config.sell_start_time)
+        if sell_time.tzinfo is None:
+            sell_time = sell_time.replace(tzinfo=tz_shanghai)
+        target = sell_time + timedelta(milliseconds=int(offset_ms))
+        started_at = time.monotonic()
+
+        while True:
+            remaining = (target - datetime.now(tz=tz_shanghai)).total_seconds()
+            if remaining <= 0:
+                break
+            # Sleep coarsely until the last 20ms, then use short sleeps.  This
+            # avoids both a CPU-burning busy loop and a long oversleep at T0.
+            sleep_for = (
+                remaining - 0.02
+                if remaining > 0.05
+                else min(0.005, remaining)
+            )
+            time.sleep(sleep_for)
+
+        log_event(
+            logger,
+            "sale_clock_reached",
+            offset_ms=int(offset_ms),
+            waited_ms=int((time.monotonic() - started_at) * 1000),
+        )
+
     def _purchase_bar_text_ready(self):
         """Inspect the detail-page CTA text and decide whether sale has opened."""
         try:

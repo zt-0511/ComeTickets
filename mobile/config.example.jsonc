@@ -35,6 +35,8 @@
   "sell_start_time": null,
   // 开抢前多少毫秒进入高频轮询
   "countdown_lead_ms": 3000,
+  // 预填正式抢票：提前进入 SKU 页，开售时只执行“下一步”（0 = 关闭提前进入）
+  "prefilled_detail_entry_lead_ms": 300,
   // CTA 等待模式：最多等待多少毫秒「立即购票」按钮从倒计时变为可点击。
   // 0 = 不启用（已知精确开抢时间时推荐）；不知道精确时间、手动停在倒计时详情页时可设 60000。
   "wait_cta_ready_timeout_ms": 0,

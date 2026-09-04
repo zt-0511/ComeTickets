@@ -70,6 +70,7 @@ KNOWN_CONFIG_KEYS = frozenset(
         "auto_navigate",
         "sell_start_time",
         "countdown_lead_ms",
+        "prefilled_detail_entry_lead_ms",
         "wait_cta_ready_timeout_ms",
         "fast_retry_count",
         "fast_retry_interval_ms",
@@ -663,6 +664,7 @@ class Config:
         app_activity=".launcher.splash.SplashMainActivity",
         sell_start_time=None,
         countdown_lead_ms=3000,
+        prefilled_detail_entry_lead_ms=300,
         wait_cta_ready_timeout_ms=0,
         fast_retry_count=8,
         fast_retry_interval_ms=120,
@@ -757,6 +759,16 @@ class Config:
             )
 
         if (
+            not isinstance(prefilled_detail_entry_lead_ms, int)
+            or isinstance(prefilled_detail_entry_lead_ms, bool)
+            or prefilled_detail_entry_lead_ms < 0
+        ):
+            raise ValueError(
+                "prefilled_detail_entry_lead_ms 必须是非负整数，"
+                f"实际值: {prefilled_detail_entry_lead_ms!r}"
+            )
+
+        if (
             not isinstance(wait_cta_ready_timeout_ms, int)
             or isinstance(wait_cta_ready_timeout_ms, bool)
             or wait_cta_ready_timeout_ms < 0
@@ -809,6 +821,7 @@ class Config:
         self.app_activity = app_activity
         self.sell_start_time = sell_start_time
         self.countdown_lead_ms = countdown_lead_ms
+        self.prefilled_detail_entry_lead_ms = prefilled_detail_entry_lead_ms
         self.wait_cta_ready_timeout_ms = wait_cta_ready_timeout_ms
         self.fast_retry_count = fast_retry_count
         self.fast_retry_interval_ms = fast_retry_interval_ms
@@ -866,6 +879,7 @@ class Config:
             "auto_navigate": self.auto_navigate,
             "sell_start_time": self.sell_start_time,
             "countdown_lead_ms": self.countdown_lead_ms,
+            "prefilled_detail_entry_lead_ms": self.prefilled_detail_entry_lead_ms,
             "wait_cta_ready_timeout_ms": self.wait_cta_ready_timeout_ms,
             "fast_retry_count": self.fast_retry_count,
             "fast_retry_interval_ms": self.fast_retry_interval_ms,
@@ -931,6 +945,9 @@ class Config:
             ),
             sell_start_time=config.get("sell_start_time"),
             countdown_lead_ms=config.get("countdown_lead_ms", 3000),
+            prefilled_detail_entry_lead_ms=config.get(
+                "prefilled_detail_entry_lead_ms", 300
+            ),
             wait_cta_ready_timeout_ms=config.get("wait_cta_ready_timeout_ms", 0),
             fast_retry_count=config.get("fast_retry_count", 8),
             fast_retry_interval_ms=config.get("fast_retry_interval_ms", 120),

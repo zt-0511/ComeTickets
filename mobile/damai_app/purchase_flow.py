@@ -34,8 +34,164 @@ except ModuleNotFoundError:  # pragma: no cover
 class PurchaseFlowMixin:
     """Mixin contributing detail→purchase entry and submit logic to ``DamaiBot``."""
 
-    def _enter_purchase_flow_from_detail_page(self, prepared=False):
+    _PREFILLED_ACTION_X_RATIO = 0.84
+    _PREFILLED_ACTION_Y_RATIO = 0.95
+    _PREFILLED_SKU_MAX_CLICKS = 3
+    _PREFILLED_SKU_CLICK_INTERVAL_SECONDS = 0.25
+    _PREFILLED_SUBMIT_SETTLE_SECONDS = 0.15
+
+    def _cache_prefilled_action_coords(self):
+        """Cache one bottom-right hotspot shared by SKU-next and submit."""
+        cached = self._cached_hot_path_coords.get("prefilled_action")
+        if cached is not None:
+            return cached
+        if not self._using_u2():
+            return None
+        try:
+            size = self.d.window_size()
+            if isinstance(size, dict):
+                width, height = int(size["width"]), int(size["height"])
+            else:
+                width, height = int(size[0]), int(size[1])
+            if width <= 0 or height <= 0:
+                return None
+            coords = (
+                min(
+                    width - 1,
+                    max(0, round(width * self._PREFILLED_ACTION_X_RATIO)),
+                ),
+                min(
+                    height - 1,
+                    max(0, round(height * self._PREFILLED_ACTION_Y_RATIO)),
+                ),
+            )
+            self._cached_hot_path_coords["prefilled_action"] = coords
+            logger.info("大麦预填直通：已缓存右下角动作坐标 %s", coords)
+            return coords
+        except Exception:
+            logger.warning("大麦预填直通：无法获取屏幕尺寸，不能启用坐标热路径")
+            return None
+
+    def _dispatch_prefilled_hotspot_click(self, action, attempt=1):
+        """Dispatch one direct u2 coordinate click without a selector lookup."""
+        coords = self._cache_prefilled_action_coords()
+        if coords is None:
+            return False
+        dispatched_at_epoch_ms = int(time.time() * 1000)
+        click_started_at = time.monotonic()
+        try:
+            self._click_coordinates(*coords, duration=25)
+        except Exception:
+            logger.warning("大麦预填直通：右下角动作点击发送失败", exc_info=True)
+            return False
+        log_event(
+            logger,
+            f"{action}_dispatched",
+            action=action,
+            attempt=int(attempt),
+            coords=coords,
+            dispatched_at_epoch_ms=dispatched_at_epoch_ms,
+            dispatch_duration_ms=int((time.monotonic() - click_started_at) * 1000),
+        )
+        return True
+
+    @staticmethod
+    def _activity_is_prefilled_order_confirm(activity):
+        """Recognize Damai's native order-confirm activities."""
+        if not activity:
+            return False
+        confirm_markers = (
+            "DmOrderActivity",
+            "OrderConfirmActivity",
+        )
+        return any(marker in activity for marker in confirm_markers)
+
+    def _advance_prefilled_sku_to_confirm(self):
+        """Click SKU-next up to three times and confirm transition by Activity only."""
+        started_at = time.monotonic()
+        for attempt in range(1, self._PREFILLED_SKU_MAX_CLICKS + 1):
+            if attempt > 1:
+                log_event(logger, "sku_next_retry", attempt=attempt)
+            dispatch_started_at = time.monotonic()
+            if not self._dispatch_prefilled_hotspot_click("sku_next", attempt=attempt):
+                return False
+
+            # Keep each attempt on a 250ms cadence.  app_current is the only
+            # device read here; no hierarchy, selector, price or attendee query.
+            deadline = (
+                dispatch_started_at + self._PREFILLED_SKU_CLICK_INTERVAL_SECONDS
+            )
+            while True:
+                activity = self._get_current_activity()
+                if self._activity_is_prefilled_order_confirm(activity):
+                    log_event(
+                        logger,
+                        "sku_transition_confirmed",
+                        activity=activity,
+                        attempts=attempt,
+                        duration_ms=int((time.monotonic() - started_at) * 1000),
+                    )
+                    return True
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(0.02, remaining))
+
+        logger.warning("大麦预填直通：连续 3 次点击后 Activity 仍停留在 SKU 页")
+        return False
+
+    def _submit_prefilled_order_hotspot(self):
+        """Submit once at the shared hotspot, then verify without another click."""
+        t0 = time.monotonic()
+        time.sleep(self._PREFILLED_SUBMIT_SETTLE_SECONDS)
+        if not self._dispatch_prefilled_hotspot_click("submit_click", attempt=1):
+            log_event(
+                logger,
+                "order_submitted",
+                level=logging.WARNING,
+                success=False,
+                result="hotspot_unavailable",
+                attempts=1,
+                duration_ms=int((time.monotonic() - t0) * 1000),
+            )
+            return "timeout"
+
+        result = self.verify_order_result(timeout=3)
+        if result == "success":
+            log_event(
+                logger,
+                "payment_confirmed",
+                duration_ms=int((time.monotonic() - t0) * 1000),
+            )
+        log_event(
+            logger,
+            "order_submitted",
+            level=logging.WARNING if result == "timeout" else logging.INFO,
+            success=result not in ("timeout", "failed"),
+            result=result,
+            attempts=1,
+            duration_ms=int((time.monotonic() - t0) * 1000),
+        )
+        return result
+
+    def _enter_purchase_flow_from_detail_page(
+        self,
+        prepared=False,
+        transition_timeout=1.5,
+        fallback_probe_on_timeout=True,
+    ):
         """Open the purchase panel from the detail page with a low-latency hot path."""
+        def wait_for_entry(timeout, poll_interval):
+            if fallback_probe_on_timeout:
+                return self._wait_for_purchase_entry_result(
+                    timeout=timeout, poll_interval=poll_interval
+                )
+            return self._wait_for_purchase_entry_result(
+                timeout=timeout,
+                poll_interval=poll_interval,
+                fallback_probe_on_timeout=False,
+            )
+
         prefilled_direct_tap = (
             self.config.rush_mode
             and self.config.use_prefilled_selection
@@ -58,10 +214,8 @@ class PurchaseFlowMixin:
                 ):
                     # Cold path: single XML dump for all detail page elements.
                     if self._rush_preselect_and_buy_via_xml():
-                        next_probe = self._wait_for_purchase_entry_result(
-                            timeout=1.5, poll_interval=0.03
-                        )
-                        if next_probe["state"] in {
+                        next_probe = wait_for_entry(transition_timeout, 0.03)
+                        if next_probe is not None and next_probe.get("state") in {
                             "sku_page",
                             "order_confirm_page",
                             "captcha",
@@ -143,10 +297,8 @@ class PurchaseFlowMixin:
                     duration_ms=int((time.monotonic() - detail_click_t0) * 1000),
                     cached=had_cached_detail_coords,
                 )
-                next_probe = self._wait_for_purchase_entry_result(
-                    timeout=1.5, poll_interval=0.03
-                )
-                if next_probe["state"] in {
+                next_probe = wait_for_entry(transition_timeout, 0.03)
+                if next_probe is not None and next_probe.get("state") in {
                     "sku_page",
                     "order_confirm_page",
                     "captcha",
@@ -170,9 +322,9 @@ class PurchaseFlowMixin:
         ):
             logger.warning("购票按钮点击失败")
             return None
-        return self._wait_for_purchase_entry_result(
-            timeout=1.5 if self.config.rush_mode else 5,
-            poll_interval=0.05 if self.config.rush_mode else 0.08,
+        return wait_for_entry(
+            transition_timeout if self.config.rush_mode else 5,
+            0.05 if self.config.rush_mode else 0.08,
         )
 
     def _submit_order_fast(self, submit_selectors):

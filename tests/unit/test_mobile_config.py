@@ -213,6 +213,18 @@ class TestMobileConfigNewFields:
         with pytest.raises(ValueError, match="countdown_lead_ms"):
             Config(**_make(countdown_lead_ms=-1))
 
+    def test_prefilled_detail_entry_lead_ms_defaults_to_300ms(self):
+        cfg = Config(**_make())
+        assert cfg.prefilled_detail_entry_lead_ms == 300
+
+    def test_prefilled_detail_entry_lead_ms_round_trips(self):
+        cfg = Config(**_make(prefilled_detail_entry_lead_ms=750))
+        assert cfg.to_dict()["prefilled_detail_entry_lead_ms"] == 750
+
+    def test_prefilled_detail_entry_lead_ms_negative_raises(self):
+        with pytest.raises(ValueError, match="prefilled_detail_entry_lead_ms"):
+            Config(**_make(prefilled_detail_entry_lead_ms=-1))
+
     def test_wait_cta_ready_timeout_ms_default(self):
         cfg = Config(**_make())
         assert cfg.wait_cta_ready_timeout_ms == 0

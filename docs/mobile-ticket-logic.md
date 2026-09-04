@@ -37,6 +37,7 @@
 - `auto_navigate`: 是否从大麦首页/搜索页自动进入目标演出
 - `sell_start_time`: 开售时间（ISO 格式字符串），null 表示立即购买
 - `countdown_lead_ms`: 提前轮询时间（毫秒），默认 3000
+- `prefilled_detail_entry_lead_ms`: 预填正式模式提前进入 SKU 的时间，默认 300ms；`sell_start_time` 仍填写官方开售时间
 - `wait_cta_ready_timeout_ms`: 当用户已手动停在倒计时详情页时，允许脚本直接等待 CTA 变成 `立即预定/立即购买` 的最长时长；默认 0 表示关闭
 - `fast_retry_count`: 快速重试次数（不重建 driver），默认 8
 - `fast_retry_interval_ms`: 快速重试间隔（毫秒），默认 80
@@ -68,6 +69,16 @@ run_with_retry(max_retries=3)
         ├── 7. 提交订单
         └── 8. 验证订单结果
 ```
+
+当 `rush_mode=true`、`use_prefilled_selection=true` 且
+`if_commit_order=true` 时，主流程改走独立的预填快速路径：
+
+1. 在 `sell_start_time - prefilled_detail_entry_lead_ms` 点击详情页购票按钮；
+2. 到 `sell_start_time` 后直接点击 SKU 右下角按钮，最多 3 次、间隔 250ms；
+3. 仅通过 Activity 进入 `DmOrderActivity`/`OrderConfirmActivity` 判定跳转成功；
+4. 等待 150ms 后点击右下角提交一次，再执行结果验证。
+
+这条路径不读取 UI hierarchy，不检查票档、数量、观演人或提交按钮文案。
 
 ## 详细流程
 

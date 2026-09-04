@@ -669,6 +669,7 @@ class DamaiBot(
         if self.config.use_prefilled_selection:
             guard = getattr(self, "_guard", None)
             coords = guard.get_cta_center_coords() if guard is not None else None
+            self._cache_prefilled_action_coords()
             if coords is not None:
                 self._cached_hot_path_coords["detail_buy"] = coords
                 logger.info("已启用大麦预填直通：保留预填信息并缓存购票坐标")
@@ -686,6 +687,31 @@ class DamaiBot(
             prepared = True
 
         return prepared
+
+    def _run_prefilled_fast_purchase(self, page_probe, start_time):
+        """Run the dedicated prefilled hot path after the sale clock releases."""
+        if page_probe["state"] == "sku_page":
+            logger.info("大麦预填极速路径：开售时直接点击下一步")
+            with self._purchase_timed_stage("sku_next_click"):
+                submit_ready = self._advance_prefilled_sku_to_confirm()
+            if not submit_ready:
+                self._set_terminal_failure("sku_transition_unverified")
+                return False
+        elif page_probe["state"] == "order_confirm_page":
+            logger.info("大麦预填极速路径：已在订单确认页，直接提交")
+        else:
+            return None
+
+        # The user deliberately trusts Damai's prefilled attendee selection.
+        # Keep the timing marker, but perform no checkbox/name/UI query.
+        skipped_at = _perf_counter()
+        self._record_purchase_stage("attendee_validation_skipped", skipped_at)
+        logger.info("大麦预填直通：按配置跳过观演人状态校验")
+
+        logger.info("大麦预填极速路径：右下角提交一次")
+        with self._purchase_timed_stage("submit_and_verify"):
+            result = self._submit_prefilled_order_hotspot()
+        return self._finalize_submit_result(result, start_time=start_time)
 
     def check_session_valid(self):
         """检查大麦 App 登录状态是否有效"""
@@ -922,6 +948,14 @@ class DamaiBot(
                 return False
 
             prepared_detail_page = False
+            prefilled_fast_submit = (
+                self.config.rush_mode
+                and self.config.use_prefilled_selection
+                and self.config.if_commit_order
+            )
+            if prefilled_fast_submit:
+                # Do the only screen-size RPC before any sale-time wait.
+                self._cache_prefilled_action_coords()
             should_prepare_detail_page = page_probe["state"] == "detail_page" and (
                 self.config.sell_start_time is not None
                 or (
@@ -934,9 +968,67 @@ class DamaiBot(
                     prepared_detail_page = self._prepare_detail_page_hot_path()
                     page_probe = self.probe_current_page()
 
-            # Wait for sale start if configured
+            # 预填正式模式提前进入 SKU，开售时刻只剩一次“下一步”点击。
+            # 这一段只使用已缓存的详情页坐标和 Activity，不读 hierarchy/文案。
+            early_entry_attempted = False
+            early_entry_lead_ms = int(
+                getattr(self.config, "prefilled_detail_entry_lead_ms", 300)
+            )
+            if (
+                prefilled_fast_submit
+                and page_probe["state"] == "detail_page"
+                and self.config.sell_start_time is not None
+                and early_entry_lead_ms > 0
+                and prepared_detail_page
+            ):
+                early_entry_attempted = True
+                with self._purchase_timed_stage("wait_for_prefilled_detail_entry"):
+                    self.wait_until_configured_sale_time(
+                        offset_ms=-early_entry_lead_ms
+                    )
+                with self._purchase_timed_stage("detail_to_purchase"):
+                    early_probe = self._enter_purchase_flow_from_detail_page(
+                        prepared=True,
+                        transition_timeout=min(
+                            0.8, max(0.2, early_entry_lead_ms / 1000 * 0.8)
+                        ),
+                        fallback_probe_on_timeout=False,
+                    )
+                if early_probe is not None and early_probe.get("state") in {
+                    "sku_page",
+                    "order_confirm_page",
+                    PageState.CAPTCHA.value,
+                }:
+                    page_probe = early_probe
+                else:
+                    logger.warning("预填提前进入未确认，将在开售时刻走一次兜底")
+
+            # 预填快速路径进入 SKU 后不再轮询详情页 CTA；其余模式保留原等待器。
             with self._purchase_timed_stage("wait_for_sale_start"):
-                self.wait_for_sale_start()
+                if prefilled_fast_submit:
+                    self.wait_until_configured_sale_time()
+                else:
+                    self.wait_for_sale_start()
+
+            # 仅在提前进入的 Activity 回执丢失时做一次轻量恢复判断。
+            if early_entry_attempted and page_probe["state"] == "detail_page":
+                current_activity = self._get_current_activity()
+                if "NcovSku" in current_activity:
+                    page_probe = {
+                        "state": "sku_page",
+                        "price_container": True,
+                        "reservation_mode": False,
+                    }
+                elif self._activity_is_prefilled_order_confirm(current_activity):
+                    page_probe = {
+                        "state": "order_confirm_page",
+                        "submit_button": True,
+                    }
+            if page_probe["state"] == PageState.CAPTCHA.value:
+                self._set_run_outcome("captcha")
+                self._set_terminal_failure("captcha")
+                logger.error("检测到大麦验证码，已暂停自动点击，请在手机上手动完成验证")
+                return False
             # 极速模式沿用开售前已确认的页面状态和缓存坐标，避免到点后再做一次
             # 3~4 秒的完整 hierarchy 探测。非极速模式仍保留稳健重探测。
             if not self.config.rush_mode:
@@ -956,7 +1048,14 @@ class DamaiBot(
                         "检测到大麦验证码，已暂停自动点击，请在手机上手动完成验证"
                     )
                     return False
-            elif page_probe["state"] == "order_confirm_page":
+
+            if prefilled_fast_submit and page_probe["state"] in {
+                "sku_page",
+                "order_confirm_page",
+            }:
+                return self._run_prefilled_fast_purchase(page_probe, start_time)
+
+            if page_probe["state"] == "order_confirm_page":
                 logger.info("当前已在订单确认页，直接校验观演人和提交状态")
             else:
                 logger.info("当前已在票档选择页，跳过城市和预约按钮步骤")
@@ -1102,89 +1201,89 @@ class DamaiBot(
             submit_ready = direct_confirm_ready
             if submit_ready:
                 logger.info("订单确认页已就绪，无需再次点击下一步")
+            elif prefilled_fast_submit:
+                logger.info("大麦预填极速路径：开售时直接点击下一步")
+                submit_ready = self._advance_prefilled_sku_to_confirm()
+                if not submit_ready:
+                    self._set_terminal_failure("sku_transition_unverified")
             else:
                 time.sleep(0.05 if self.config.use_prefilled_selection else 0.2)
                 logger.info("确定购买...")
-            confirm_window = (
-                1.8
-                if self.config.use_prefilled_selection
-                else (3.0 if self.config.rush_mode else 1.8)
-            )
-            confirm_deadline = time.time() + confirm_window
-            max_confirm_attempts = (
-                1
-                if self.config.use_prefilled_selection
-                else (4 if self.config.rush_aggressive_retry else 2)
-            )
-            confirm_attempt = 0
-            while (
-                time.time() < confirm_deadline
-                and not submit_ready
-                and confirm_attempt < max_confirm_attempts
-            ):
-                confirm_attempt += 1
-                burst_count = (
-                    2
-                    if self.config.rush_aggressive_retry
-                    and self.config.if_commit_order
-                    and not self.config.use_prefilled_selection
-                    else 1
+                confirm_window = (
+                    1.8
+                    if self.config.use_prefilled_selection
+                    else (3.0 if self.config.rush_mode else 1.8)
                 )
-                if self.config.rush_mode and buy_button_coords:
-                    if confirm_attempt == 1:
-                        self._burst_click_coordinates(
-                            *buy_button_coords,
-                            count=burst_count,
-                            interval_ms=25,
-                            duration=25,
-                        )
-                    else:
-                        self._click_sku_buy_button_element(
-                            burst_count=burst_count
-                        )
-                elif self.config.rush_mode:
-                    # 先做一次轻量元素点击；仅在元素路径失败时解析坐标兜底。
-                    clicked = self._click_sku_buy_button_element(
-                        burst_count=burst_count
+                confirm_deadline = time.time() + confirm_window
+                max_confirm_attempts = (
+                    1
+                    if self.config.use_prefilled_selection
+                    else (4 if self.config.rush_aggressive_retry else 2)
+                )
+                confirm_attempt = 0
+                while (
+                    time.time() < confirm_deadline
+                    and not submit_ready
+                    and confirm_attempt < max_confirm_attempts
+                ):
+                    confirm_attempt += 1
+                    burst_count = (
+                        2
+                        if self.config.rush_aggressive_retry
+                        and self.config.if_commit_order
+                        and not self.config.use_prefilled_selection
+                        else 1
                     )
-                    if not clicked:
-                        _buy_coords = self._get_buy_button_coordinates()
-                        if _buy_coords:
+                    if self.config.rush_mode and buy_button_coords:
+                        if confirm_attempt == 1:
                             self._burst_click_coordinates(
-                                *_buy_coords,
+                                *buy_button_coords,
                                 count=burst_count,
                                 interval_ms=25,
                                 duration=25,
                             )
-                            buy_button_coords = _buy_coords
                         else:
-                            self.ultra_fast_click(
-                                By.ID, "cn.damai:id/btn_buy_view", timeout=0.2
+                            self._click_sku_buy_button_element(
+                                burst_count=burst_count
                             )
-                else:
-                    if not self.ultra_fast_click(By.ID, "cn.damai:id/btn_buy_view"):
-                        self.ultra_fast_click(
-                            ANDROID_UIAUTOMATOR,
-                            'new UiSelector().textMatches(".*确定.*|.*购买.*")',
+                    elif self.config.rush_mode:
+                        # 先做一次轻量元素点击；仅在元素路径失败时解析坐标兜底。
+                        clicked = self._click_sku_buy_button_element(
+                            burst_count=burst_count
                         )
-                log_event(
-                    logger,
-                    "hot_click",
-                    action="sku_next",
-                    duration_ms=int((_perf_counter() - confirm_started_at) * 1000),
-                    prefilled=bool(self.config.use_prefilled_selection),
-                )
-                if (
-                    self.config.use_prefilled_selection
-                    and self.config.if_commit_order
-                ):
-                    # 正式预填模式不在这里等 checkbox/文案后又重新
-                    # 查找「立即提交」。_submit_order_fast 会用同一次
-                    # wait-and-click 在按钮出现的瞬间直接点击。
-                    submit_ready = True
-                    logger.info("大麦预填直通：下一步后直接等待并点击立即提交")
-                else:
-                    # Short wait then check if confirm page appeared
+                        if not clicked:
+                            _buy_coords = self._get_buy_button_coordinates()
+                            if _buy_coords:
+                                self._burst_click_coordinates(
+                                    *_buy_coords,
+                                    count=burst_count,
+                                    interval_ms=25,
+                                    duration=25,
+                                )
+                                buy_button_coords = _buy_coords
+                            else:
+                                self.ultra_fast_click(
+                                    By.ID,
+                                    "cn.damai:id/btn_buy_view",
+                                    timeout=0.2,
+                                )
+                    else:
+                        if not self.ultra_fast_click(
+                            By.ID, "cn.damai:id/btn_buy_view"
+                        ):
+                            self.ultra_fast_click(
+                                ANDROID_UIAUTOMATOR,
+                                'new UiSelector().textMatches(".*确定.*|.*购买.*")',
+                            )
+                    log_event(
+                        logger,
+                        "hot_click",
+                        action="sku_next",
+                        duration_ms=int(
+                            (_perf_counter() - confirm_started_at) * 1000
+                        ),
+                        prefilled=bool(self.config.use_prefilled_selection),
+                    )
                     remaining = confirm_deadline - time.time()
                     check_timeout = min(
                         1.5 if self.config.use_prefilled_selection else 0.8,
@@ -1194,22 +1293,24 @@ class DamaiBot(
                         timeout=check_timeout,
                         poll_interval=0.03 if self.config.rush_mode else 0.05,
                     )
-                if self._terminal_failure_reason:
-                    break
-                if not submit_ready and confirm_attempt < max_confirm_attempts:
-                    logger.debug(f"确定按钮第 {confirm_attempt} 次点击未生效，重试...")
-                    time.sleep(0.25)
-                # 兜底检查票档是否已经售罄。
-                if not submit_ready and confirm_attempt == max_confirm_attempts:
-                    if self._is_buy_button_sold_out():
-                        logger.warning(
-                            "购买按钮区域检测到缺货/售罄标识，该票档当前不可购买"
+                    if self._terminal_failure_reason:
+                        break
+                    if not submit_ready and confirm_attempt < max_confirm_attempts:
+                        logger.debug(
+                            f"确定按钮第 {confirm_attempt} 次点击未生效，重试..."
                         )
-                        self._set_terminal_failure("sold_out")
-                        self._record_purchase_stage(
-                            purchase_transition_stage, confirm_started_at
-                        )
-                        return False
+                        time.sleep(0.25)
+                    # 兜底检查票档是否已经售罄。
+                    if not submit_ready and confirm_attempt == max_confirm_attempts:
+                        if self._is_buy_button_sold_out():
+                            logger.warning(
+                                "购买按钮区域检测到缺货/售罄标识，该票档当前不可购买"
+                            )
+                            self._set_terminal_failure("sold_out")
+                            self._record_purchase_stage(
+                                purchase_transition_stage, confirm_started_at
+                            )
+                            return False
             self._record_purchase_stage(
                 purchase_transition_stage, confirm_started_at
             )
@@ -1288,7 +1389,10 @@ class DamaiBot(
             # 7. 提交订单
             logger.info("提交订单...")
             with self._purchase_timed_stage("submit_and_verify"):
-                result = self._submit_order_fast(submit_selectors)
+                if prefilled_fast_submit:
+                    result = self._submit_prefilled_order_hotspot()
+                else:
+                    result = self._submit_order_fast(submit_selectors)
             return self._finalize_submit_result(result, start_time=start_time)
 
         except Exception as e:
