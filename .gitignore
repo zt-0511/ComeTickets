@@ -38,7 +38,6 @@ htmlcov/
 .pytest_cache/
 
 # Real config files (use *.example as template)
-mobile/config.jsonc
 mobile/config.local.jsonc
 
 # U-06: 配置写回产生的备份与 sidecar 锁文件
@@ -57,3 +56,4 @@ reference/
 
 # Local, non-committed Claude Code project memory (auto-loaded; overrides/augments CLAUDE.md)
 CLAUDE.local.md
+.coverage.wutoudeMacBook-Pro.local.*

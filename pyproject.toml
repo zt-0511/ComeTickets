@@ -1,7 +1,7 @@
 [tool.poetry]
-name = "damai-ticket-automation"
+name = "come-tickets"
 version = "0.5.0"
-description = "Automated ticket purchasing system for Damai.com"
+description = "ComeTickets Android automation toolkit for Damai ticket purchasing"
 authors = ["Your Name <your.email@example.com>"]
 readme = "README.md"
 packages = [

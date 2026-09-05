@@ -1,0 +1,33 @@
+{
+  "serial": "N8K5T17815003952",
+
+  "keyword": "泉州 黄丽玲 A-Lin 歌迹 Journey",
+  "target_title": "泉州·黄丽玲A-Lin《歌迹》Journey世界巡回演唱会",
+  "target_venue": null,
+
+  "users": ["张同贤"],
+
+  "city": "泉州",
+  "date": "2026-10-31 周六 19:30",
+  "price": "看台880元",
+  "price_index": 2,
+
+  "probe_only": false,
+  "if_commit_order": true,
+
+  "auto_navigate": false,
+
+  "sell_start_time": "2026-09-05T15:18:00+08:00",
+  "countdown_lead_ms": 3000,
+  "prefilled_detail_entry_lead_ms": 600,
+  "wait_cta_ready_timeout_ms": 0,
+
+  "rush_mode": true,
+  "rush_skip_session": false,
+  "rush_skip_price_dump": true,
+  "rush_aggressive_retry": false,
+  "use_prefilled_selection": true,
+
+  "fast_retry_count": 3,
+  "fast_retry_interval_ms": 400
+}

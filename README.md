@@ -1,6 +1,8 @@
-# HaTickets - 大麦抢票自动化
+# ComeTickets v0.5.0 - 大麦抢票自动化
 
-这个仓库不是票务展示站，而是一个“大麦抢票自动化工具箱”。
+ComeTickets 不是票务展示站，而是一个通过 Android 真机控制大麦 App 的自动抢票工具箱。
+
+> **版本状态**：当前发布版本为 `v0.5.0`。`master` 已包含发布后的预填极速路径、分阶段耗时统计和提交结果 fail-closed 验证增强；正式下单仍必须显式使用 `--commit`。
 
 > ✅ **适合你**：有一台安卓真机、能用命令行（会敲 `adb` / `poetry`）、想给自己或家人抢票。
 > ⛔ **不适合你**：没有安卓真机（iOS / 纯 PC / Mac 无真机都跑不了）、完全没碰过命令行、或期待“装个 App 点一下就抢”。这是一套需要动手配置的自动化工具，不是开箱即用的成品软件。
@@ -9,7 +11,7 @@
 
 - [适用人群与准入门槛](#适用人群与准入门槛)
 - [风险与合规提示](#风险与合规提示)
-- [推荐环境](#推荐环境) · [当前状态](#当前状态) · [方案状态](#方案状态) · [三个旗标的语义](#三个旗标的语义)
+- [推荐环境](#推荐环境) · [当前版本能力](#当前版本能力) · [方案状态](#方案状态) · [三个旗标的语义](#三个旗标的语义)
 - [五分钟跑通 Mobile](#五分钟跑通-mobile)（新用户从这里开始）
 - [退出码与运行摘要](#退出码与运行摘要)（无人值守 / 多设备编排）
 - [常见问题](#常见问题)
@@ -48,9 +50,13 @@
 - 版权与商标声明：见 [NOTICE](./NOTICE)
 - 免责申明：见 [DISCLAIMER.md](./DISCLAIMER.md)
 
-## 当前状态
+## 当前版本能力
 
-- `Mobile`：当前主推方案，也是 README 主要说明对象
+- `Mobile`：当前唯一主推方案，使用 UIAutomator2 直连 Android 真机，无需 Appium 服务
+- `安全闸门`：`--probe` 绝不下单；只有 `--commit` 能授权提交订单
+- `预填极速路径`：可在预约页预填场次、票档、数量和观演人，开售前提前进入 SKU 页
+- `可观测性`：记录页面探测、等待开售、SKU 跳转、提交与验证等阶段耗时，并输出 `run_summary.json`
+- `失败保护`：提交后未确认支付页时返回 `submit_unverified` 并停止重试，避免重复下单
 - ~~`Web`~~：**已移除** — 大麦网页端风控升级后 Selenium 方案已不可用，代码已从仓库删除
 - `Desktop`：**已被官方渠道限制，当前视为不可用，不再推荐，也不要作为主流程投入时间**
 
@@ -241,6 +247,8 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 - `probe_only=true`：脚本内部使用的探测标记；普通用户优先使用 `--probe`
 - `if_commit_order=false`：脚本会继续到确认页并执行观演人勾选校验，但会停在“立即提交”前；正式抢票时 `start_ticket_grabbing.sh --commit` 会自动改成 `true`
 - `auto_navigate=true`：允许脚本从首页/搜索页自动进入目标演出
+- `prefilled_detail_entry_lead_ms`：预填模式提前进入 SKU 页的时间，模板默认 `300` 毫秒；设为 `0` 可关闭提前进入
+- `use_prefilled_selection=true`：仅适用于已在预约页预填场次、票档、数量和观演人的实战路径，会跳过这些状态的常规校验
 
 如果你是手动配置用户，完成这一步后，可以直接用下面这条命令做一次安全探测：
 
@@ -304,6 +312,17 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 ```
 
 这组配置适合“我会提前守在详情页，等按钮从倒计时变成立即购买”的场景，但也更容易让人误以为脚本卡住了。对大多数普通用户来说，如果你已经知道开抢时间，优先用第一种配置。
+
+3. 已在预约页完成预填，需要走当前版本的极速路径
+
+```jsonc
+"sell_start_time": "2026-04-06T12:00:00+08:00",
+"prefilled_detail_entry_lead_ms": 300,
+"use_prefilled_selection": true,
+"auto_navigate": false
+```
+
+该模式会在开售前提前进入 SKU 页，开售时直接执行“下一步”和提交，并跳过票档、数量及观演人状态的常规校验。只应在你已经人工确认预填内容完全正确时启用；首次使用或普通自动导航场景请保持 `use_prefilled_selection=false`。
 
 ### 4. 正式提交前再确认一次
 
@@ -457,7 +476,7 @@ HATICKETS_SERIAL=emulator-5554 HATICKETS_RESULT_JSON=/tmp/run.json \
 ```ini
 # systemd unit 片段：失败自动重启，但对「不可重试失败」与「配置/设备错误」绝不重启
 [Service]
-ExecStart=/path/to/HaTickets/mobile/scripts/start_ticket_grabbing.sh --probe --yes --serial emulator-5554
+ExecStart=/path/to/ComeTickets/mobile/scripts/start_ticket_grabbing.sh --probe --yes --serial emulator-5554
 Restart=on-failure
 RestartPreventExitStatus=11 12
 ```
@@ -577,7 +596,7 @@ yarn tauri dev
 ## 项目结构
 
 ```text
-HaTickets/
+ComeTickets/
 ├── mobile/                  # Android App 自动化
 ├── desktop/                 # Tauri + Rust 桌面端
 ├── docs/                    # 文档、流程图、说明图
